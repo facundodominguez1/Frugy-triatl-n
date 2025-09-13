@@ -1,0 +1,360 @@
+#include <Adafruit_NeoPixel.h> 
+#include <EEPROM.h>
+
+// Pines QTR8A
+#define D1 35
+#define D2 32
+#define D3 33
+#define D4 25
+#define D5 26
+#define D6 27
+#define D7 14
+#define D8 13
+
+// Salidas Motor driver TA6586-1
+#define IN1A 22
+#define IN1B 23
+
+// Salidas Motor driver TA6586-2
+#define IN2A 4
+#define IN2B 16
+
+// Botón que va a estar en input pull up
+#define BUTTON_PIN 21
+
+// Valor del setpoint para los sensores (el valor no varia)
+#define valorsetpoint 450
+
+// Variables para regleta
+const int sensores[8] = { D1, D2, D3, D4, D5, D6, D7, D8 };
+int valor_blanco[8];
+int valor_negro[8];
+int valor_umbrales[8];
+bool valor_binario[8];
+int pos = 0;
+
+// PWM's
+int PWM1 = 250;  //pwm de la izquierda
+int PWM2 = 250;  //pwm de la derecha
+
+// Configuración de NeoPixel
+int ledneopixel = 17;
+int pinsneopixel = 15;  //este no deberia ir
+
+// Configuración de PWM para control de motores
+const int frequency = 1000;
+const int resolution = 8;
+
+// Canales PWM del ESP32
+const int ledChannel = 0;
+const int ledChannel1 = 1;
+const int ledChannel2 = 2;
+const int ledChannel3 = 3;
+
+// constantes PID
+float kp = 2;     //proporcional
+float ki = 0.01;  //integral
+float kd = 0.5;   //derivativo
+
+// Variables PID
+float error = 0;
+float prevError = 0;
+float integral = 0;
+float derivative = 0;
+float outputPID = 0;
+
+
+// Tamaño total que vamos a usar en EEPROM: 3*8*2 = 48 bytes (redondeo a 64)
+constexpr size_t EEPROM_SIZE = 64;
+
+constexpr int ADDR_FLAG = 0;                    // 2 bytes para flag de validez
+constexpr int ADDR_BLANCOS = ADDR_FLAG + 2;     // 16 bytes
+constexpr int ADDR_NEGROS = ADDR_BLANCOS + 16;  // 16 bytes
+constexpr int ADDR_UMBRAL = ADDR_NEGROS + 16;
+
+#define EEPROM_FLAG_VALUE 0xBEEF  // Valor mágico para validar dato
+
+Adafruit_NeoPixel pixels = Adafruit_NeoPixel(pinsneopixel, ledneopixel, NEO_GRB + NEO_KHZ800);
+
+
+void setup() {
+  // ... inicializaciones previas
+   Serial.begin(115200);
+
+  // Inicializar EEPROM y NeoPixel
+  eepromBeginIfNeeded();
+  loadCalibration();  // Carga la última calibración guardada
+  pixels.begin();
+  pixels.clear();
+  pixels.show(); 
+
+  //Configuración de pines QTR8A
+  pinMode(D1, INPUT);
+  pinMode(D2, INPUT);
+  pinMode(D3, INPUT);
+  pinMode(D4, INPUT);
+  pinMode(D5, INPUT);
+  pinMode(D6, INPUT);
+  pinMode(D7, INPUT);
+  pinMode(D8, INPUT);
+
+
+  ledcSetup(ledChannel, frequency, resolution);
+  ledcAttachPin(IN1A, ledChannel);
+
+  ledcSetup(ledChannel1, frequency, resolution);
+  ledcAttachPin(IN1B, ledChannel1);
+
+  ledcSetup(ledChannel2, frequency, resolution);
+  ledcAttachPin(IN2A, ledChannel2);
+
+  ledcSetup(ledChannel3, frequency, resolution);
+  ledcAttachPin(IN2B, ledChannel3);
+
+  //configuracion de  pin del boton
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  //pinMode(ledneopixel, OUTPUT);
+
+  while(digitalRead(BUTTON_PIN));
+  delay(20);
+  unsigned long startPress = millis();
+  while (digitalRead(BUTTON_PIN) == LOW) {
+    delay(20);
+    // Espera mientras está presionado
+  }
+  unsigned long pressTime = millis() - startPress;
+
+  if (pressTime >= 1000) {
+    Serial.println("Entro1");
+    // Botón mantenido 1s o más → calibrar
+    calibrarSensores();
+  } else {
+    Serial.println("Entro2");
+    // Pulsado corto → cargar datos
+    if (!loadCalibration()) {
+      // Si no hay datos válidos, forzar calibración
+      calibrarSensores();
+    }
+  }
+}
+
+void loop() {
+  
+  espera();
+  sprinter_mode();
+  
+}
+
+// ====FUNCIONES PARA MEMORIA EEPROM====
+void eepromBeginIfNeeded() {  // Inicialización EEPROM
+  static bool inited = false;
+  if (!inited) {
+    EEPROM.begin(EEPROM_SIZE);
+    inited = true;
+  }
+}
+
+void saveCalibration() {  // Guardar calibración
+
+  eepromBeginIfNeeded();
+  for (int i = 0; i < 8; i++) EEPROM.put(ADDR_BLANCOS + i * 2, valor_blanco[i]);
+  for (int i = 0; i < 8; i++) EEPROM.put(ADDR_NEGROS + i * 2, valor_negro[i]);
+  for (int i = 0; i < 8; i++) EEPROM.put(ADDR_UMBRAL + i * 2, valor_umbrales[i]);
+  EEPROM.commit();
+}
+
+bool loadCalibration() {
+  eepromBeginIfNeeded();
+  uint16_t flag;
+  EEPROM.get(ADDR_FLAG, flag);
+  if (flag != EEPROM_FLAG_VALUE) {
+    return false; // No hay datos válidos
+  }
+  for (int i = 0; i < 8; i++) EEPROM.get(ADDR_BLANCOS + i*2, valor_blanco[i]);
+  for (int i = 0; i < 8; i++) EEPROM.get(ADDR_NEGROS  + i*2, valor_negro[i]);
+  for (int i = 0; i < 8; i++) EEPROM.get(ADDR_UMBRAL  + i*2, valor_umbrales[i]);
+  return true;
+}
+
+void calibrarSensores() {  // Función de calibración (tu código con guardado al final)
+  pixels.show();
+  while (digitalRead(BUTTON_PIN))
+    ;
+  delay(10);
+
+  for (int x = 0; x < 8; x++) {
+    int valor_promedio = 0;
+    for (int i = 0; i < 10; i++) {
+      valor_promedio += analogRead(sensores[x]);
+    }
+    valor_blanco[x] = (uint16_t)(valor_promedio / 10);
+  }
+
+  delay(200);
+  while (!digitalRead(BUTTON_PIN))
+    ;
+  delay(10);
+  while (digitalRead(BUTTON_PIN))
+    ;
+
+  for (int x = 0; x < 8; x++) {
+    int valor_promedio = 0;
+    for (int i = 0; i < 10; i++) {
+      valor_promedio += analogRead(sensores[x]);
+    }
+    valor_negro[x] = (uint16_t)(valor_promedio / 10);
+  }
+
+  for (int x = 0; x < 8; x++) {
+    valor_umbrales[x] = (uint16_t)((valor_blanco[x] + valor_negro[x]) / 2);
+  }
+
+  saveCalibration();  // Guarda en EEPROM
+
+  delay(200);
+  pixels.clear();
+  while (!digitalRead(BUTTON_PIN))
+    ;
+  delay(10);
+  while (digitalRead(BUTTON_PIN))
+    ;
+}
+
+
+// ==== FUNCION VELOCISTA ====
+void sprinter_mode() {
+
+  // girarder(); // aca se busca que gire y que busque la linea negra y que tambien tenga un poco de linea blanca
+
+  // Lee la posición de la línea
+  int posicion = leerSensores();  // función que devuelva valor entre 0 y 7000 aprox.
+
+  // Calcula la corrección PID
+  float correccion = calcularPID(posicion);
+
+  // Velocidades base
+  int velocidadBase = 200;
+
+  // Ajustar velocidades de cada motor
+  int velocidadIzq = velocidadBase + correccion;
+  int velocidadDer = velocidadBase - correccion;
+
+  // Limitar a rango válido
+  velocidadIzq = constrain(velocidadIzq, -255, 255);
+  velocidadDer = constrain(velocidadDer, -255, 255);
+
+  motores(velocidadIzq, velocidadDer);  // tu función para mover motores
+
+  for (int x = 0; x < 8; x++) {
+    int valor = analogRead(sensores[x]);
+    if (valor > valor_umbrales[x]) {
+      valor_binario[x] = 1;
+    } else {
+      valor_binario[x] = 0;
+    }
+  }
+  for (int y = 0; y < 8; y++) {
+    pos = pos + valor_binario[y] * 100;
+  }
+
+  for (int i = 0; i < 8; i++) {
+    Serial.print(valor_umbrales[i]);
+    Serial.print(" ");
+  }
+  Serial.println(pos);
+  pos = 0;
+  Serial.println("");
+  delay(100);
+
+  /*
+    if (digitalRead(D4&D5) == LOW) {
+        avanzar();
+    }
+    else if(digitalRead(D3&D4) == LOW) {
+        PWM1=40;
+        girarIzq();
+    }
+    else if(digitalRead(D5&D6) == LOW) {
+        PWM2=40;
+        girarDer();
+    }
+    else if(digitalRead(D6&D7) == LOW) {
+        PWM2=80;
+        girarDer();
+    }
+    else if(digitalRead(D3&D2) == LOW) {
+        PWM1=80;
+        girarIzq();
+    }
+    else if(digitalRead(D1&D2) == LOW) {
+        PWM1=140;
+        girarIzq();
+    }
+    else if(digitalRead(D7&D8) == LOW) {
+        PWM2=140;
+        girarDer();
+    }
+    */
+}
+
+// ====FUNCIONES PID====
+float calcularPID(int posicion) {
+  error = valorsetpoint - posicion;  // Calcular error
+  integral += error;                 // Acumular integral
+  derivative = error - prevError;    // Calcular derivada
+
+  outputPID = (kp * error) + (ki * integral) + (kd * derivative);
+
+  prevError = error;  // Guardar error para la próxima iteración
+
+  return outputPID;
+}
+
+int leerSensores() {
+  unsigned int position = 0;
+  unsigned int sumaValores = 0;
+
+  for (int i = 0; i < 8; i++) {
+    int lectura = analogRead(sensores[i]);
+    int valor = (lectura > valor_umbrales[i]) ? 1 : 0;
+
+    position += valor * (i * 100);
+    sumaValores += valor;
+  }
+
+  if (sumaValores == 0) {
+    return valorsetpoint;
+  }
+
+  return position / sumaValores;
+}
+
+// ===== FUNCIONES =====
+void motores(int izq, int der) {  //0 hasta 255 adelate 0 hasta -255 atras
+
+  if (izq >= 0) {
+    ledcWrite(ledChannel, izq);
+    ledcWrite(ledChannel1, 0);  //analog
+  } else {
+    izq = izq * (-1);
+    ledcWrite(ledChannel1, izq);
+    ledcWrite(ledChannel, 1);
+  }
+  //motor derecho//
+  if (der >= 0) {
+    ledcWrite(ledChannel2, der);
+    ledcWrite(ledChannel3, 0);
+  } else {
+    der = der * (-1);
+    ledcWrite(ledChannel3, der);
+    ledcWrite(ledChannel2, 1);
+  }
+}
+void espera() {
+
+  delay(3000);
+  pixels.show();
+  pixels.setPixelColor(0, 255, 0, 0);  // rojo
+  delay(2000);
+  pixels.clear();
+}
