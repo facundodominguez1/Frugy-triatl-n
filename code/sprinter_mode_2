@@ -1,0 +1,267 @@
+#include <BluetoothSerial.h>
+
+// =================== CONFIGURACIÓN ===================
+#define REGLA 1
+//#define DEBUG                 // ← descomenta para logs por USB
+
+// ---------- Pines (ajusta según tu placa ESP32) ----------
+#define BOTTOM1         21      // Botón único: incrementa kp
+#define LED_STATUS      17       // LED de estado (GPIO2)
+
+// Pines del puente H (DRV8833)
+#define M1_A  22
+#define M1_B  23
+#define M2_A  4
+#define M2_B  16
+
+// Canales PWM (LEDC)
+#define CH_M1_A  0
+#define CH_M1_B  1
+#define CH_M2_A  2
+#define CH_M2_B  3
+
+// Frecuencia PWM y resolución (8 bits = 0..255)
+#define PWM_FREQ   1000
+#define PWM_RES    8
+
+// ---------- Sensores ----------
+const int sensores[8] = {35, 32, 33, 25, 26, 27, 14, 13}; // ajusta según hardware
+int valor_blanco[8];
+int valor_negro[8];
+int valor_umbrales[8];
+bool valor_binario[8];
+
+// =================== PID y control ===================
+#define TIME 5  // periodo mínimo (ms) entre actualizaciones de PID
+
+int pos = 0, poslast = 0, sumap = 0, suma = 0;
+
+float kp = 0.09f;
+float ki = 0.0f;
+float kd = 2.0f;
+
+float error = 0, lastError = 0, integral = 0, derivative = 0;
+float setpoint = 400;
+int   correccion = 0;
+int   baseSpeed = 70;
+
+// Debounce botón
+unsigned long debounceDelay = 100;
+unsigned long lastDebounceTime1 = 0;
+bool lastState1 = HIGH;
+
+// Tiempos
+unsigned long lastTime = 0;
+
+// Bluetooth Serial (SPP)
+BluetoothSerial SerialBT;
+
+// =================== Motores (función en lugar de clase) ===================
+// Escribe PWM diferencial en DRV8833: -255..+255 por lado
+void Motores(int left, int right) {
+  left  = constrain(left,  -255, 255);
+  right = constrain(right, -255, 255);
+
+  // Motor 1
+  if (left > 0) {
+    ledcWrite(CH_M1_A, left);
+    ledcWrite(CH_M1_B, 0);
+  } else if (left < 0) {
+    ledcWrite(CH_M1_A, 0);
+    ledcWrite(CH_M1_B, -left);
+  } else {
+    ledcWrite(CH_M1_A, 0);
+    ledcWrite(CH_M1_B, 0);
+  }
+
+  // Motor 2
+  if (right > 0) {
+    ledcWrite(CH_M2_A, right);
+    ledcWrite(CH_M2_B, 0);
+  } else if (right < 0) {
+    ledcWrite(CH_M2_A, 0);
+    ledcWrite(CH_M2_B, -right);
+  } else {
+    ledcWrite(CH_M2_A, 0);
+    ledcWrite(CH_M2_B, 0);
+  }
+}
+
+// =================== Tu PID (igual a tu forma) ===================
+int calcularPID(int lectura) {
+  error = setpoint - lectura;
+  integral += error;
+  derivative = error - lastError;
+  lastError = error;
+  return kp * error + ki * integral + kd * derivative;
+}
+
+// --- Helper para imprimir arrays por Bluetooth ---
+void printArrayBT(const char* label, const int* arr, int n) {
+  SerialBT.print(label);
+  SerialBT.print(": ");
+  for (int i = 0; i < n; i++) {
+    SerialBT.print(arr[i]);
+    if (i < n - 1) SerialBT.print(", ");
+  }
+  SerialBT.println();
+}
+
+void calibrarSensores() {
+  digitalWrite(LED_STATUS, HIGH); // LED ON: inicio calibración
+
+  // Presionar BOTTOM1 para medir blanco
+  while (digitalRead(BOTTOM1) == HIGH) {}
+  delay(10);
+  for (int x = 0; x < 8; x++) {
+    int valor_prom = 0;
+    for (int i = 0; i < 10; i++) valor_prom += analogRead(sensores[x]);
+    valor_blanco[x] = valor_prom / 10;
+  }
+
+  // Imprimir blancos
+  SerialBT.println("[CAL] Lectura BLANCO:");
+  printArrayBT("blanco", valor_blanco, 8);
+
+  // Soltar y volver a presionar para medir negro
+  while (digitalRead(BOTTOM1) == LOW)  {}
+  delay(10);
+  while (digitalRead(BOTTOM1) == HIGH) {}
+  delay(10);
+  for (int x = 0; x < 8; x++) {
+    int valor_prom = 0;
+    for (int i = 0; i < 10; i++) valor_prom += analogRead(sensores[x]);
+    valor_negro[x] = valor_prom / 10;
+  }
+
+  // Imprimir negros
+  SerialBT.println("[CAL] Lectura NEGRO:");
+  printArrayBT("negro", valor_negro, 8);
+
+  // Calcular e imprimir umbrales
+  for (int x = 0; x < 8; x++) {
+    valor_umbrales[x] = (valor_blanco[x] + valor_negro[x]) / 2;
+  }
+  SerialBT.println("[CAL] UMBRALES calculados:");
+  printArrayBT("umbral", valor_umbrales, 8);
+
+  digitalWrite(LED_STATUS, LOW); // LED OFF: fin calibración
+
+  while (digitalRead(BOTTOM1) == LOW) {}
+  delay(10);
+}
+
+// =================== Setup ===================
+void setup() {
+  pinMode(BOTTOM1, INPUT_PULLUP);
+  pinMode(LED_STATUS, OUTPUT);
+  digitalWrite(LED_STATUS, LOW);
+
+  // Bluetooth SPP
+  SerialBT.begin("RobotPID_ESP32");
+  #ifdef DEBUG
+    Serial.begin(115200);
+    Serial.println("BT listo: RobotPID_ESP32");
+  #endif
+  SerialBT.println("BT listo: RobotPID_ESP32");
+
+  // PWM (LEDC)
+  ledcSetup(CH_M1_A, PWM_FREQ, PWM_RES);
+  ledcSetup(CH_M1_B, PWM_FREQ, PWM_RES);
+  ledcSetup(CH_M2_A, PWM_FREQ, PWM_RES);
+  ledcSetup(CH_M2_B, PWM_FREQ, PWM_RES);
+
+  ledcAttachPin(M1_A, CH_M1_A);
+  ledcAttachPin(M1_B, CH_M1_B);
+  ledcAttachPin(M2_A, CH_M2_A);
+  ledcAttachPin(M2_B, CH_M2_B);
+  Motores(0, 0);
+
+  // Calibración
+  calibrarSensores();
+
+//digitalWrite(LED_STATUS, HIGH);
+  while (digitalRead(BOTTOM1) == HIGH) {}
+  delay(3000);
+  digitalWrite(LED_STATUS, HIGH);
+  delay(2000);
+
+  SerialBT.printf("Calibración completa. kp inicial=%.2f\n", kp);
+  #ifdef DEBUG
+    Serial.printf("Calibración completa. kp inicial=%.2f\n", kp);
+  #endif
+
+  lastTime = millis();
+}
+
+// =================== Loop ===================
+void loop() {
+  // Leer sensores
+  sumap = 0;
+
+  for (int x = 0; x < 8; x++) {
+    int valor = analogRead(sensores[x]);
+    valor_binario[x] = valor > valor_umbrales[x] ? REGLA : !REGLA;
+    sumap = sumap + valor_binario[x] * 100;
+  }
+  pos = sumap;
+  poslast = pos;//No se usa
+
+  // ===== PID (misma forma) =====
+  if (millis() > TIME + lastTime) {
+    correccion = calcularPID(pos);
+    lastTime = millis();
+  }
+
+  // ===== Motores =====
+  int vL = baseSpeed + correccion;
+  int vR = baseSpeed - correccion;
+  Motores(vR, vL);
+
+  // ===== Botón: incrementar kp y avisar por Bluetooth =====
+  static bool lastState = HIGH;
+  static unsigned long lastDebounce = 0;
+  bool curr = digitalRead(BOTTOM1);
+  if (curr == LOW && lastState == HIGH && (millis() - lastDebounce > debounceDelay)) {
+    kp += 0.05f;
+    lastDebounce = millis();
+    SerialBT.printf("Nuevo kp: %.2f\n", kp);
+    #ifdef DEBUG
+      Serial.printf("Nuevo kp: %.2f\n", kp);
+    #endif
+  }
+  lastState = curr;
+
+   // ===== Enviar valor de pos por Bluetooth =====
+  static unsigned long lastSend = 0;
+  if (millis() - lastSend > 200) {   // cada 200 ms
+    lastSend = millis();
+    SerialBT.printf("pos=%d kp=%.2f kd=%.2f BS=%d\n", pos, kp, kd, baseSpeed);
+
+    #ifdef DEBUG
+      Serial.printf("pos=%d kp=%.2f err=%.2f out=%d\n", pos, kp, error, correccion);
+    #endif
+  }
+
+  if(SerialBT.available() >0) {
+    char dato = SerialBT.read();
+    switch (dato)
+    {
+    case '1':
+      kp += 0.05f;
+      break;
+    case '2':
+      kd += 0.05f;
+      break;
+    case '3':
+      baseSpeed += 10;
+      baseSpeed = constrain(baseSpeed, 0, 255);
+      break; 
+
+    default:
+      break;
+    }
+
+  }
+
+}
