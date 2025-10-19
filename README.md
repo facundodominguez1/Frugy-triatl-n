@@ -2,6 +2,8 @@
 
 ![Imagen de WhatsApp 2025-10-18 a las 21 52 04_16612dd6](https://github.com/user-attachments/assets/bc3048f4-b35b-45ae-b8a8-978600b406c0)
 
+![Imagen de WhatsApp 2025-10-18 a las 21 53 57_ca518bda](https://github.com/user-attachments/assets/1dd8b381-9f99-4bdb-becd-c6c089c440f1)
+
 
 ## Frugy 
 
