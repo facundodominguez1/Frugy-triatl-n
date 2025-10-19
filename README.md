@@ -1,5 +1,4 @@
 # Robot Triatlon "FRUGY" - Bonaerenses 2025
-<img width="750" height="573" alt="image" src="https://github.com/user-attachments/assets/66a0ee45-a07a-4c04-b2ad-3f1f3997a3eb" />
 
 ![Imagen de WhatsApp 2025-10-18 a las 21 52 04_16612dd6](https://github.com/user-attachments/assets/bc3048f4-b35b-45ae-b8a8-978600b406c0)
 
