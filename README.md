@@ -32,3 +32,13 @@ Esta rama es cuando el robot tiene que sacar una serie de cubos de una pista de 
 - 1 Microcontrolador ESP32 de 38 Pines
 - 2 Placas de pertinax 10cmX10cm
 - 1 Led Neopixel
+
+
+## FALLAS Y DETALLES 
+
+
+- En este proyecto hubo muchos problemas con calculo de tiempos
+- Desconocimiento para un proyecto tan importante
+- no tener muy en cuenta el gasto total del proyecto
+
+
