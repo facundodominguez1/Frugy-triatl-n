@@ -39,6 +39,6 @@ Esta rama es cuando el robot tiene que sacar una serie de cubos de una pista de 
 
 - En este proyecto hubo muchos problemas con calculo de tiempos
 - Desconocimiento para un proyecto tan importante
-- no tener muy en cuenta el gasto total del proyecto
+- No tener muy en cuenta el gasto total del proyecto
 
 
